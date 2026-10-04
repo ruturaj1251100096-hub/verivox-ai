@@ -2,6 +2,7 @@ import onnxruntime as ort
 import numpy as np 
 import librosa 
 from huggingface_hub import hf_hub_download
+import json
 
 
 from fastapi import FastAPI, UploadFile, File
@@ -53,6 +54,24 @@ async def analyze_call(file: UploadFile = File(...)):
     }
 @app.post("/detect-scam")
 async def detect_scam(transcript: str):
+    prompt = f"""Analyze this call transcript for scam signals. Transcript: {transcript}
+
+Respond with ONLY valid JSON, no other text, no markdown formatting, in this exact format:
+{{"risk_score": <number 0-100>, "risk_level": "Safe or Suspicious or Critical", "reasons": ["reason1", "reason2"], "explanation": "one line explanation"}}"""
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt
+        )
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].replace("json", "", 1).strip()
+        return json.loads(text)
+    except Exception as e:
+        print(f"Gemini API error: {e}")
+        return {"risk_score": 0, "risk_level": "Unknown", "reasons": [], "explanation": "Analysis temporarily unavailable"}
+@app.post("/detect-scam")
+async def detect_scam(transcript: str):
     prompt = f"Analyze this call transcript for scam signals (OTP requests, urgency, threats, bank impersonation, fake authority). Transcript: {transcript}. Respond with: risk_level (Safe/Suspicious/Critical), reasons (list), and a one-line explanation."
     try:
         response = gemini_client.models.generate_content(
@@ -89,4 +108,46 @@ async def check_voice(file: UploadFile = File(...)):
         "filename": file.filename,
         "deepfake_probability": round(fake_probability * 100, 2),
         "verdict": "Likely AI/Synthetic Voice" if fake_probability > 0.5 else "Likely Real Human Voice"
+    }
+@app.post("/full-analysis")
+async def full_analysis(file: UploadFile = File(...)):
+    contents = await file.read()
+    with open("temp_full.mp3", "wb") as f:
+        f.write(contents)
+
+    result = model.transcribe("temp_full.mp3")
+    transcript = result["text"]
+
+    scam_prompt = f"""Analyze this call transcript for scam signals. Transcript: {transcript}
+
+Respond with ONLY valid JSON, no other text: {{"risk_score": <0-100>, "risk_level": "Safe or Suspicious or Critical", "reasons": ["..."], "explanation": "..."}}"""
+    try:
+        scam_response = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=scam_prompt)
+        text = scam_response.text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].replace("json", "", 1).strip()
+        scam_data = json.loads(text)
+    except Exception as e:
+        print(f"Scam analysis error in full-analysis: {e}")
+        scam_data = {"risk_score": 0, "risk_level": "Unknown", "reasons": [], "explanation": "Analysis unavailable"}
+    voice_fake_prob = check_voice_authenticity("temp_full.mp3")
+    voice_score = voice_fake_prob * 100
+
+    overall_score = (scam_data["risk_score"] * 0.7) + (voice_score * 0.3)
+    if overall_score >= 70:
+        overall_level = "CRITICAL"
+    elif overall_score >= 40:
+        overall_level = "SUSPICIOUS"
+    else:
+        overall_level = "SAFE"
+
+    return {
+        "transcript": transcript,
+        "scam_analysis": scam_data,
+        "voice_authenticity": {
+            "deepfake_probability": round(voice_score, 2),
+            "verdict": "Likely AI/Synthetic" if voice_fake_prob > 0.5 else "Likely Real Human"
+        },
+        "overall_risk_score": round(overall_score, 2),
+        "overall_risk_level": overall_level
     }
