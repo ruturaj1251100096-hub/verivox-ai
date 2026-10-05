@@ -3,6 +3,7 @@ import numpy as np
 import librosa 
 from huggingface_hub import hf_hub_download
 import json
+from fastapi.middleware.cors import CORSMiddleware
 
 
 from fastapi import FastAPI, UploadFile, File
@@ -16,6 +17,12 @@ from dotenv import load_dotenv
 from google import genai
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 model = whisper.load_model("base")
 voice_model_path = hf_hub_download(repo_id="ayush2635/Dhwani-Multilingual-Deepfake-Audio-Detection-Model",filename="best_model.onnx")
@@ -133,8 +140,15 @@ Respond with ONLY valid JSON, no other text: {{"risk_score": <0-100>, "risk_leve
     voice_fake_prob = check_voice_authenticity("temp_full.mp3")
     voice_score = voice_fake_prob * 100
 
+    analysis_failed = scam_data.get("risk_level") == "Unknown"
+
     overall_score = (scam_data["risk_score"] * 0.7) + (voice_score * 0.3)
-    if overall_score >= 70:
+
+    if analysis_failed:
+        overall_level = "SUSPICIOUS (Unable to fully verify — manual review recommended)"
+    elif scam_data["risk_score"] >= 90 or voice_score >= 90:
+        overall_level = "CRITICAL"
+    elif overall_score >= 70:
         overall_level = "CRITICAL"
     elif overall_score >= 40:
         overall_level = "SUSPICIOUS"
